@@ -1649,9 +1649,11 @@ const hayFiltro=()=>!!(F.q||F.asesor||F.placa||F.zona||F.est);
    salida marcada tarde) NO entran en los cálculos: se listan aparte en "Marcas por revisar".
    ===================================================================== */
 const IND={preset:leer('seg_ind_preset','7d'),desde:leer('seg_ind_desde',''),hasta:leer('seg_ind_hasta',''),turno:'todos',placa:'',
-  D:null,prev:null,clave:'',clavePrev:'',cargando:false,error:'',t:0,dia:'',verCli:false,verTr:false,rev:'',revMas:false,pedido:0};
+  D:null,prev:null,clave:'',clavePrev:'',prevFalla:'',cargando:false,error:'',t:0,dia:'',verCli:false,verTr:false,rev:'',revMas:false,pedido:0};
 const IND_PRESETS=[['hoy','Hoy'],['ayer','Ayer'],['7d','7 días'],['mes','Este mes'],['mesAnt','Mes anterior'],['rango','Rango']];
-const IND_REV={lote:'Marcado en lote',corto:'Menos de 1 min en el cliente',largo:'Más de 4 h en el cliente',sinLlegada:'Sin «Llegué»',cruce:'Horas cruzadas',salidaTarde:'Salida marcada tarde'};
+const IND_REV={lote:'Marcado en lote',corto:'Menos de 1 min en el cliente',largo:'Más de 4 h en el cliente',sinLlegada:'Sin «Llegué»',lejos:'«Llegué» lejos del cliente o del cierre',cruce:'Horas cruzadas',salidaTarde:'Salida marcada tarde'};
+/* «Llegué» marcado a más de esta distancia del cliente = lo tocaron antes de llegar (o cerraron la parada en otro lugar) */
+const IND_LEJOS_M=500;
 const IND_IC={
   cliente:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21V10l8-6 8 6v11"/><path d="M9 21v-6h6v6"/></svg>',
   via:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3 4 21M17 3l3 18"/><path d="M12 4v3M12 11v3M12 18v2"/></svg>',
@@ -1715,7 +1717,9 @@ async function indCargar(forzar){
   /* el periodo anterior, para comparar (en segundo plano) */
   const [pa,pb]=indAnterior(a,b),kp=pa+'|'+pb;
   if(IND.clavePrev===kp&&IND.prev)return;
-  try{const P=await indTraer(pa,pb);if(yo!==IND.pedido)return;IND.prev=P;IND.clavePrev=kp;indPintar();}catch(e){}
+  IND.prevFalla='';
+  try{const P=await indTraer(pa,pb);if(yo!==IND.pedido)return;IND.prev=P;IND.clavePrev=kp;indPintar();}
+  catch(e){if(yo===IND.pedido){IND.prevFalla=kp;indPintar();}}   // AUDITORÍA 3: que no quede «Comparando…» para siempre
 }
 
 /* ---------- modelo: paradas, tramos y marcas por revisar ---------- */
@@ -1739,13 +1743,19 @@ function indModelo(D){
     s.fs.push(r);
   });
   const rev=[];
+  const dist=(a,b)=>indKm({la:a[0],lo:a[1]},{la:b[0],lo:b[1]})*1000;
   cams.forEach(c=>{
     c.paradas.forEach(s=>{
       s.est=estadoParada(s.fs.map(f=>f.e));
-      const ll=s.fs.map(f=>f.ll).filter(Boolean).sort(),fi=s.fs.map(f=>f.fi).filter(Boolean).sort();
+      /* AUDITORÍA 22/11: una factura anulada sin «Llegué» (la anuló la oficina, nadie fue) no da horas de
+         la visita. Antes su hora de anulación se tomaba como fin de la parada y la inflaba (o la mandaba
+         a «más de 4 h»). Solo si TODAS son así, la parada es «sin ir». */
+      const conVisita=s.fs.filter(f=>!(f.e==='ANULADO'&&!f.ll)),fsT=conVisita.length?conVisita:s.fs;
+      const ll=fsT.map(f=>f.ll).filter(Boolean).sort(),fi=fsT.map(f=>f.fi).filter(Boolean).sort();
       s.ll=ll[0]||'';s.fi=FINAL[s.est]?(fi[fi.length-1]||''):'';
-      s.o=Math.min(...s.fs.map(f=>+f.o||999));
-      const g=s.fs.filter(f=>f.la!=null&&f.lo!=null&&isFinite(f.la)&&isFinite(f.lo));
+      /* AUDITORÍA 2: la posición de la parada sale solo de las facturas de la visita (una anulada «sin ir»
+         pudo marcarse en otro lugar, por ejemplo en el almacén) */
+      const g=fsT.filter(f=>f.la!=null&&f.lo!=null&&isFinite(f.la)&&isFinite(f.lo)&&!(f.la===0&&f.lo===0));
       if(g.length){s.la=g.reduce((x,f)=>x+f.la,0)/g.length;s.lo=g.reduce((x,f)=>x+f.lo,0)/g.length;}
       s.users=[...new Set(s.fs.map(f=>f.u).filter(Boolean))];
       s.nf=s.fs.length;
@@ -1769,19 +1779,49 @@ function indModelo(D){
         i=j+1;
       }else i++;
     }
+    /* horas cruzadas: «Llegué» al siguiente antes de cerrar el anterior. No pudieron estar en los dos
+       clientes a la vez: o el cierre de uno o la llegada al otro está mal. AUDITORÍA 22/11: antes solo se
+       anotaba y los dos tiempos seguían contando; ahora ninguno de los dos entra. */
+    for(let i=0;i<vis.length-1;i++){
+      const a=vis[i];if(!a.fi)continue;
+      /* AUDITORÍA 2: el siguiente con «Llegué» (una parada «sin Llegué» en medio ya no esconde el cruce) */
+      let b=null;for(let j=i+1;j<vis.length;j++)if(vis[j].ll){b=vis[j];break;}
+      if(!b||indMinEntre(a.fi,b.ll)>=0)continue;
+      [a,b].forEach(s=>{if(!s.flags.includes('cruce'))s.flags.push('cruce');});
+      rev.push({tipo:'cruce',d:c.d,t:c.t,pl:c.pl,hora:hm(b.ll),cli:corto(b.cli),
+        det:'«Llegué» a '+corto(b.cli)+' ('+hm(b.ll)+') antes de cerrar '+corto(a.cli)+' ('+hm(a.fi)+')',us:[...new Set(a.users.concat(b.users))]});
+    }
+    /* «Llegué» lejos del cliente: dónde estaba el celular al tocar «Llegué» comparado con la ubicación
+       confirmada del cliente o, si aún no la tiene, con donde se cerró la parada. AUDITORÍA 2: contra donde
+       se cerró solo si ese cierre es confiable; si la parada ya está en lote, más de 4 h u horas cruzadas,
+       el cierre pudo hacerse en otro lugar y culparía al «Llegué» sin razón. */
+    vis.forEach(s=>{
+      if(!s.ll||!FINAL[s.est])return;
+      const fl=s.fs.find(f=>f.pa!=null&&f.po!=null&&isFinite(f.pa)&&!(f.pa===0&&f.po===0)),fc=s.fs.find(f=>f.ca!=null&&f.co!=null&&isFinite(f.ca));
+      if(!fl)return;
+      const cierreDudoso=s.flags.some(f=>f==='lote'||f==='largo'||f==='cruce');
+      const ref=fc?[fc.ca,fc.co]:(s.la!=null&&!cierreDudoso)?[s.la,s.lo]:null;
+      if(ref){s.distLl=dist([fl.pa,fl.po],ref);s.refConf=!!fc;if(s.distLl>IND_LEJOS_M)s.flags.push('lejos');}
+    });
     vis.forEach(s=>s.flags.forEach(f=>{
-      if(f==='lote')return;
-      const det=f==='corto'?Math.max(0,Math.round(s.min*60))+' s entre «Llegué» y el fin':f==='largo'?durTxt(Math.round(s.min))+' en el cliente: ¿se olvidó cerrar la parada?':'Pasó directo a '+TXT[s.est].toLowerCase()+': no se puede medir su tiempo en el cliente';
+      if(f==='lote'||f==='cruce')return;
+      const det=f==='corto'?Math.max(0,Math.round(s.min*60))+' s entre «Llegué» y el fin'
+        :f==='largo'?durTxt(Math.round(s.min))+' en el cliente: ¿se olvidó cerrar la parada?'
+        :f==='lejos'?(s.refConf?'«Llegué» se tocó a '+indDistTxt(s.distLl)+' de la ubicación confirmada del cliente: ¿lo marcaron antes de llegar?'
+          :'«Llegué» y el cierre se marcaron a '+indDistTxt(s.distLl)+' uno del otro: o tocaron «Llegué» antes de llegar o cerraron la parada lejos')
+        :'Pasó directo a '+TXT[s.est].toLowerCase()+': no se puede medir su tiempo en el cliente';
       rev.push({tipo:f,d:c.d,t:c.t,pl:c.pl,hora:hm(s.ll||s.fi),cli:corto(s.cli),det,us:s.users});
     }));
-    /* tramos entre clientes, en el orden real de visita */
+    /* tramos entre clientes, en el orden real de visita. AUDITORÍA 22/11: un tramo no entra si una de sus
+       dos horas viene de una marca dudosa: el cierre del anterior (lote, más de 4 h, lejos, cruzado) o la
+       llegada al siguiente («Llegué» tarde <1 min, lejos, cruzado, lote). Antes solo se excluía el lote. */
+    const MAL_FIN=['lote','largo','lejos','cruce'],MAL_LL=['lote','corto','lejos','cruce'];
     c.tramos=[];
     for(let i=1;i<vis.length;i++){
       const a=vis[i-1],b=vis[i];if(!a.fi||!b.ll)continue;
       const t={a,b,min:indMinEntre(a.fi,b.ll),km:a.la!=null&&b.la!=null?indKm(a,b):null,cam:c,flags:[]};
-      if(t.min<0){t.flags.push('cruce');rev.push({tipo:'cruce',d:c.d,t:c.t,pl:c.pl,hora:hm(b.ll),cli:corto(b.cli),
-        det:'«Llegué» a '+corto(b.cli)+' ('+hm(b.ll)+') antes de cerrar '+corto(a.cli)+' ('+hm(a.fi)+')',us:b.users});}
-      if(a.flags.includes('lote')||b.flags.includes('lote'))t.flags.push('lote');
+      if(t.min<0)t.flags.push('cruce');
+      else if(a.flags.some(f=>MAL_FIN.includes(f))||b.flags.some(f=>MAL_LL.includes(f)))t.flags.push('dudoso');
       c.tramos.push(t);
     }
     /* salida del almacén */
@@ -1790,9 +1830,12 @@ function indModelo(D){
       const f=vis[0];
       if(f.ll){c.alm={min:indMinEntre(c.sal,f.ll),flags:[]};
         if(c.alm.min<0){c.alm.flags.push('salidaTarde');rev.push({tipo:'salidaTarde',d:c.d,t:c.t,pl:c.pl,hora:hm(c.sal),cli:corto(f.cli),
-          det:'La salida ('+hm(c.sal)+') quedó después de llegar al primer cliente ('+hm(f.ll)+')',us:[sl.u].filter(Boolean)});}}
-      const u=vis[vis.length-1];
-      if(u.fi&&c.paradas.every(s=>FINAL[s.est])){c.total={min:indMinEntre(c.sal,u.fi),flags:[]};if(u.flags.includes('lote')||c.total.min<0)c.total.flags.push('x');}
+          det:'La salida ('+hm(c.sal)+') quedó después de llegar al primer cliente ('+hm(f.ll)+')',us:[sl.u].filter(Boolean)});}
+        else if(f.flags.some(x=>MAL_LL.includes(x)))c.alm.flags.push('dudoso');}   // la llegada al 1er cliente es dudosa
+      /* ruta completa: hasta el ÚLTIMO cierre real (no siempre es el último cliente visitado) */
+      const fin=vis.filter(s=>s.fi&&FINAL[s.est]).sort((a,b)=>indMs(a.fi)-indMs(b.fi)),u=fin[fin.length-1];
+      if(u&&c.paradas.every(s=>FINAL[s.est])){c.total={min:indMinEntre(c.sal,u.fi),flags:[]};
+        if(c.total.min<0||u.flags.some(x=>MAL_FIN.includes(x)))c.total.flags.push('dudoso');}
     }
     c.base=vis.filter(s=>FINAL[s.est]).length;
     c.limpias=vis.filter(s=>FINAL[s.est]&&!s.flags.length).length;
@@ -1828,15 +1871,16 @@ function indDurHtml(m){
   m=Math.round(m);if(m<60)return `<b>${m}</b><i>min</i>`;
   return `<b>${Math.floor(m/60)}</b><i>h</i><b>${String(m%60).padStart(2,'0')}</b>`;
 }
+const indDistTxt=m=>m<1000?Math.round(m/10)*10+' m':indKmTxt(m/1000);
 const indKmTxt=k=>k==null?'—':(k<10?k.toFixed(1).replace('.',','):Math.round(k))+' km';
 function indDelta(act,ant,menosMejor){
   if(act==null||ant==null||!isFinite(act)||!isFinite(ant))return '';
   const d=act-ant,abs=Math.abs(d);
   const unidad=menosMejor===null?'pts':'min';
-  if((unidad==='min'&&abs<1)||(unidad==='pts'&&abs<1))return `<span class="ind-delta igual">= igual<span class="lg"> que el periodo anterior</span></span>`;
+  if((unidad==='min'&&abs<1)||(unidad==='pts'&&abs<1))return `<span class="ind-delta igual"><span>= igual<span class="lg"> que el periodo anterior</span></span></span>`;
   const bueno=menosMejor===null?d>0:menosMejor?d<0:d>0;
   const txt=unidad==='pts'?Math.round(abs)+' pts':indDur(abs);
-  return `<span class="ind-delta ${bueno?'bien':'mal'}"><i aria-hidden="true">${d<0?'▼':'▲'}</i>${txt} ${d<0?'menos':'más'}<span class="lg"> que el periodo anterior</span></span>`;
+  return `<span class="ind-delta ${bueno?'bien':'mal'}"><i aria-hidden="true">${d<0?'▼':'▲'}</i><span>${txt} ${d<0?'menos':'más'}<span class="lg"> que el periodo anterior</span></span></span>`;
 }
 
 /* ---------- pintar ---------- */
@@ -1888,7 +1932,8 @@ function indContenido(){
   /* Orden de lectura: resumen del periodo → el día de cada camión → cada camión en el periodo →
      dónde se va el tiempo (clientes | recorridos, misma altura) → marcas que no entraron. */
   h+=`<div class="ind-cuerpo${IND.cargando||!ok?' viejo':''}">`;
-  h+=indTiles(m,P,!!IND.prev||IND.cargando);
+  /* AUDITORÍA 3: el periodo anterior llega después; mientras tanto dice «Comparando…», no «Sin datos» */
+  h+=indTiles(m,P,P?'ok':IND.prevFalla===kp?'error':'cargando');
   h+=indCarretera(cams);
   h+=indPorCamion(cams);
   h+=`<div class="ind-par">${indClientes(cams)}${indTramos(cams)}</div>`;
@@ -1900,23 +1945,24 @@ function indContenido(){
 /* --- resumen: una sola franja con 5 celdas idénticas (título · valor · P90 · comparación) --- */
 const IND_SW={cli:'<i class="sw sw-cli" aria-hidden="true"></i>',reco:'<i class="sw sw-via" aria-hidden="true"></i>',
   alm:'<i class="sw sw-alm" aria-hidden="true"></i>',tot:'<i class="sw sw-tot" aria-hidden="true"></i>',conf:'<i class="sw sw-conf" aria-hidden="true"></i>'};
-function indDeltaLinea(act,ant,menosMejor,hayPrev){
+function indDeltaLinea(act,ant,menosMejor,prevEst){
   if(act==null)return '<span class="ind-delta nulo">&nbsp;</span>';
-  if(!hayPrev)return '<span class="ind-delta nulo">Comparando con el periodo anterior…</span>';
+  if(prevEst==='cargando')return '<span class="ind-delta nulo">Comparando con el periodo anterior…</span>';
+  if(prevEst==='error')return '<span class="ind-delta nulo">No se pudo traer el periodo anterior</span>';
   return indDelta(act,ant,menosMejor)||'<span class="ind-delta nulo">Sin datos del periodo anterior</span>';
 }
-function indTile(k,tit,st,sub,P,Pst,vacio){
+function indTile(k,tit,st,sub,prevEst,Pst,vacio){
   const hay=st&&st.n;
   return `<div class="ind-k ${k}" role="group" aria-label="${esc(tit)}">
     <div class="ind-k-h">${IND_SW[k]}<span>${esc(tit)}</span></div>
     <div class="ind-k-v">${hay?indDurHtml(st.med):'<b class="nada">—</b>'}${hay?'<small>mediana</small>':''}</div>
     <div class="ind-k-s">${hay?`<span class="p90">P90</span><b>${indDur(st.p90)}</b><em>· ${plural(st.n,sub[0],sub[1])}</em>`:`<em>${esc(vacio)}</em>`}</div>
-    ${indDeltaLinea(hay?st.med:null,Pst&&Pst.n?Pst.med:null,true,!!P)}
+    ${indDeltaLinea(hay?st.med:null,Pst&&Pst.n?Pst.med:null,true,prevEst)}
   </div>`;
 }
-function indTiles(m,P,esperaPrev){
+function indTiles(m,P,prevEst){
   const conf=m.conf==null?null:Math.round(m.conf*100),confP=P&&P.conf!=null?Math.round(P.conf*100):null;
-  const Pv=P||(esperaPrev?null:{});   // {} = ya se intentó y no hay periodo anterior
+  const Pv=prevEst;
   return `<section class="ind-kpis" aria-label="Resumen del periodo">
     ${indTile('cli','En el cliente',m.enCli,['parada','paradas'],Pv,P&&P.enCli,'Aún no hay paradas con «Llegué» y fin.')}
     ${indTile('reco','Entre clientes',m.entre,['tramo','tramos'],Pv,P&&P.entre,'Aún no hay tramos entre dos clientes.')}
@@ -1926,7 +1972,7 @@ function indTiles(m,P,esperaPrev){
       <div class="ind-k-h">${IND_SW.conf}<span>Marcas confiables</span></div>
       <div class="ind-k-v">${conf==null?'<b class="nada">—</b>':`<b>${conf}</b><i>%</i>`}<span class="ind-k-medidor" role="img" aria-label="${conf==null?'sin datos':conf+'%'}"><i style="width:${conf||0}%"></i></span></div>
       <div class="ind-k-s"><b>${m.limpias}</b><em>de ${plural(m.base,'parada','paradas')} sin observaciones</em></div>
-      ${indDeltaLinea(conf,confP,null,!!Pv)}
+      ${indDeltaLinea(conf,confP,null,Pv)}
     </div>
   </section>`;
 }
@@ -2040,7 +2086,8 @@ function indComo(){
     <dt>Entre clientes</dt><dd>Desde el fin de un cliente hasta «Llegué» en el siguiente, en el orden real de visita. Incluye todo lo que pasa en el camino: tráfico, refrigerio, combustible o espera afuera del local. La distancia es en línea recta entre las ubicaciones de las marcas.</dd>
     <dt>Almacén → 1er cliente y Ruta completa</dt><dd>Desde «Salí del almacén» (Mi Ruta) hasta «Llegué» en el primer cliente, o hasta el fin del último cliente. Solo hay dato desde que el equipo empieza a marcar su salida.</dd>
     <dt>Mediana y P90</dt><dd>La mediana es el tiempo normal: la mitad de las veces se tarda menos y la otra mitad más. El P90 es lo que se tarda en un día malo: solo 1 de cada 10 veces se tarda más. No se usa el promedio porque una sola parada olvidada abierta lo distorsiona.</dd>
-    <dt>Marcas por revisar</dt><dd>No entran en los cálculos: 3 o más clientes terminados en 2 minutos o menos (marcado en lote), menos de 1 minuto o más de 4 horas en el cliente, pasar a terminado sin «Llegué», «Llegué» antes de cerrar el cliente anterior y la salida marcada después de llegar al primer cliente. «Marcas confiables» es el porcentaje de paradas sin ninguno de estos casos.</dd>
+    <dt>Marcas por revisar</dt><dd>No entran en los cálculos: 3 o más clientes terminados en 2 minutos o menos (marcado en lote), menos de 1 minuto o más de 4 horas en el cliente, pasar a terminado sin «Llegué», «Llegué» tocado a más de ${IND_LEJOS_M} m del cliente (de su ubicación confirmada o, si aún no la tiene, de donde se cerró la parada), «Llegué» antes de cerrar el cliente anterior (no entra ninguno de los dos) y la salida marcada después de llegar al primer cliente. Tampoco entra un recorrido o una ruta completa que empiece o termine en una de esas marcas. «Marcas confiables» es el porcentaje de paradas sin ninguno de estos casos.</dd>
+    <dt>Facturas anuladas sin ir</dt><dd>Si la oficina anula una factura sin que el equipo llegue, su hora no cuenta como visita. En un cliente con otras facturas entregadas, el tiempo se mide solo con esas.</dd>
   </dl></details>`;
 }
 
@@ -2096,14 +2143,15 @@ function indCsv(){
   const M=indModelo(IND.D);if(!M)return;
   const q=v=>{const s=String(v==null?'':v);return /[";\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;};
   const n=v=>v==null||!isFinite(v)?'':String(Math.round(v*10)/10).replace('.',',');
-  const filas=[['Fecha','Turno','Placa','Ruta','Personal','Orden real','Cliente','Distrito','Zona','Facturas','Estado','Salida almacén','Llegó','Terminó','Min en cliente','Min desde el cliente anterior','Km desde el anterior (línea recta)','Min desde el almacén','Marcó','Por revisar']];
+  const filas=[['Fecha','Turno','Placa','Ruta','Personal','Orden real','Cliente','Distrito','Zona','Facturas','Estado','Salida almacén','Llegó','Terminó','Min en cliente','Min desde el cliente anterior','Km desde el anterior (línea recta)','Min desde el almacén','Marcó','Por revisar','¿Cuenta el tiempo en el cliente?','¿Cuenta el recorrido desde el anterior?']];
   M.cams.forEach(c=>{
     const tr=new Map(c.tramos.map(t=>[t.b,t]));
     c.paradas.slice().sort((a,b)=>(a.pos||999)-(b.pos||999)).forEach(s=>{
       const t=tr.get(s),prim=c.vis[0]===s;
       filas.push([c.d,turnoTxt(c.t),c.pl,c.ru,c.pe,s.pos||'',s.cli,s.di,s.z,s.nf,s.sinIr?'Anulado sin ir':TXT[s.est],hm(c.sal),hm(s.ll),hm(s.fi),
         s.min!=null?n(s.min):'',t?n(t.min):'',t&&t.km!=null?n(t.km):'',prim&&c.alm?n(c.alm.min):'',s.users.join(' '),
-        [...s.flags.map(f=>IND_REV[f]),...(t?t.flags.filter(f=>f==='cruce').map(f=>IND_REV[f]):[]),...(prim&&c.alm?c.alm.flags.map(f=>IND_REV[f]):[])].join(', ')]);
+        [...new Set([...s.flags,...(prim&&c.alm?c.alm.flags.filter(f=>f==='salidaTarde'):[])])].map(f=>IND_REV[f]).join(', '),
+        s.min==null?'':!s.flags.length&&FINAL[s.est]?'Sí':'No',t?(t.flags.length?'No':'Sí'):'']);
     });
   });
   const csv='﻿'+filas.map(f=>f.map(q).join(';')).join('\r\n');
