@@ -1038,7 +1038,7 @@ main{padding:16px 24px 10px}
    chofer (fijo) con su volante y los ayudantes (rotan) como un grupo de iniciales. El detalle sale en la burbuja. */
 .cam-cel{display:flex;align-items:center;gap:14px;min-width:0}
 .cam-cel .placa{flex:none;min-width:84px;text-align:center;font-size:16px;padding:6px 8px 4px}
-.eqp{all:unset;box-sizing:border-box;display:grid;gap:5px;min-width:0;padding:4px 8px;margin:-4px -8px;border-radius:9px;cursor:help;transition:background .12s}
+.eqp{all:unset;box-sizing:border-box;display:grid;gap:5px;min-width:0;padding:4px 8px;margin:-4px -8px;border-radius:9px;cursor:pointer;transition:background .12s}
 .eqp:hover{background:#f1f3f5}
 .eqp:focus-visible{outline:2px solid var(--rojo);outline-offset:1px}
 .eqp-ch{display:flex;align-items:center;gap:6px;min-width:0;font-size:13.5px;font-weight:600;color:var(--texto);line-height:1.15}
@@ -1055,6 +1055,9 @@ main{padding:16px 24px 10px}
 .ind-t tbody tr:hover .eqp-av i{box-shadow:0 0 0 2px #fafbfc}
 .ind-t tbody tr:hover .eqp-av i.ext{box-shadow:0 0 0 2px #fafbfc,inset 0 0 0 1px #c9cfd6}
 @media (max-width:760px){.cam-cel{gap:12px}.cam-cel .placa{font-size:17px}}
+
+/* v28: en Indicadores el selector de día no aplica (tiene su propio periodo), pero ocupa su lugar para que la cabecera mida igual en todas las pestañas */
+.fecha.fecha-hueco{visibility:hidden;pointer-events:none}
 </style>
 </head>
 <body>
@@ -2107,7 +2110,7 @@ function indPorCamion(cams){
   const por=new Map();cams.forEach(c=>{let g=por.get(c.pl);if(!g){g={pl:c.pl,cs:[],ru:new Set(),pe:new Set()};por.set(c.pl,g);}g.cs.push(c);if(c.ru)g.ru.add(c.ru);if(c.pe)g.pe.add(c.pe);});
   const filas=[...por.values()].sort((a,b)=>a.pl.localeCompare(b.pl)).map(g=>{
     const m=indMedidas(g.cs),conf=m.conf==null?null:Math.round(m.conf*100);
-    return `<tr data-ipla="${esc(g.pl)}" tabindex="0" title="Ver solo ${esc(g.pl)}"><th scope="row"><div class="cam-cel"><span class="placa">${esc(g.pl)}</span>${indEquipoHtml(g.pl,g.cs)}</div></th>
+    return `<tr data-ipla="${esc(g.pl)}" tabindex="0" aria-label="${esc(g.pl)}: toca para ver solo este camión"><th scope="row"><div class="cam-cel"><span class="placa">${esc(g.pl)}</span>${indEquipoHtml(g.pl,g.cs)}</div></th>
       <td class="n" data-l="Días">${m.dias}</td><td class="n" data-l="Paradas">${m.visitas}</td>
       <td class="t cli" data-l="En el cliente">${indCelda(m.enCli)}</td><td class="t reco" data-l="Entre clientes">${indCelda(m.entre)}</td>
       <td class="t" data-l="Almacén → 1°">${indCelda(m.alm)}</td><td class="t" data-l="Ruta completa">${indCelda(m.total)}</td>
@@ -2270,7 +2273,7 @@ function pintar(){
       <img class="top-logo" src="${LOGO}" alt="Provefabrica">
       <div class="top-tit"><h1>Seguimiento de Pedidos — Despacho y Distribución</h1><p>Provefabrica del Perú S.A. · Almacén Huachipa, Lima Este</p></div>
       <span class="top-esp"></span>
-      ${enInd?'':`<div class="fecha"><button class="fl" id="diaAnt" aria-label="Día anterior">‹</button>
+      ${enInd?`<div class="fecha fecha-hueco" aria-hidden="true"><button class="fl" tabindex="-1" disabled>‹</button><button class="fecha-b" tabindex="-1" disabled><b>${esc(fechaCorta(dia))}</b><small>${IC_CAL}Cambiar fecha</small></button><button class="fl" tabindex="-1" disabled>›</button>${dia!==hoyLima()?'<button class="hoy" tabindex="-1" disabled>Hoy</button>':''}</div>`:`<div class="fecha"><button class="fl" id="diaAnt" aria-label="Día anterior">‹</button>
         <button class="fecha-b" id="diaBtn" aria-haspopup="dialog" aria-expanded="${calAbierto}" aria-label="${esc(fechaCorta(dia))}. Elegir otra fecha en el calendario"><b>${esc(fechaCorta(dia))}</b><small>${IC_CAL}${esc(relDia(dia)==='Elegir otra fecha'?'Cambiar fecha':relDia(dia))}</small></button>
         <button class="fl" id="diaSig" aria-label="Día siguiente">›</button>${dia!==hoyLima()?'<button class="hoy" id="diaHoy">Hoy</button>':''}</div>`}
       <div class="usuario"><div class="quien"><b>${esc(ses.usuario)}</b><small>CONSULTA</small></div><button class="btn-claro" id="salir">Salir</button></div>
