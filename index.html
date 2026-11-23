@@ -1274,6 +1274,7 @@ const IC={
 let ses=leer('seg_ses',null);
 let dia=hoyLima();
 let datos=null, estMap={}, ultCarga=0, ultIntento=0, inicioCarga=0, cargando=false, error='', usuarioEscrito='';
+let idCarga=0, cargaDia='';   // v28: cada consulta tiene su número; solo la última del día que se mira cuenta
 let turno=leer('seg_turno','todos');
 let vista=leer('seg_vista2',matchMedia('(max-width:760px)').matches?'pedido':'tablero');
 const F={q:'',asesor:leer('seg_asesor',''),placa:'',zona:'',est:'',tipo:''};
@@ -1589,7 +1590,10 @@ document.addEventListener('keydown',e=>{if(!visorCtx)return;
 async function cargar(silencioso){
   if(!ses)return;
   /* una consulta colgada no puede trabar las siguientes */
-  if(cargando&&Date.now()-inicioCarga<45000)return;
+  /* v28: si cambiaste de día mientras cargaba otro, la consulta del día nuevo sale igual (antes se ignoraba y
+     la pantalla quedaba en «No se pudo cargar el despacho» hasta la siguiente actualización) */
+  if(cargando&&cargaDia===dia&&Date.now()-inicioCarga<45000)return;
+  const mio=++idCarga;cargaDia=dia;
   cargando=true;inicioCarga=ultIntento=Date.now();pintarVivo();
   const pidio=dia;
   try{
@@ -1609,8 +1613,9 @@ async function cargar(silencioso){
     }
     datos=r;estMap={};(r.estados||[]).forEach(e=>{estMap[e.clave]=e;});indexarInc(r);
     ultCarga=Date.now();error='';
-  }catch(e){error=e.message;}
-  finally{cargando=false;}
+  }catch(e){if(mio===idCarga&&pidio===dia)error=e.message;}
+  finally{if(mio===idCarga)cargando=false;}
+  if(mio!==idCarga||pidio!==dia)return;
   pintar();
   if(detCtx)abrirDetalle(detCtx,true);
 }
@@ -2621,7 +2626,7 @@ cal.addEventListener('keydown',e=>{
 function irDia(iso){
   if(iso===dia)return;
   dia=iso;datos=null;estMap={};error='';abiertos.clear();cerrarDetalle();
-  pintar();cargar(false);
+  cargar(false);pintar();          // v28: primero se pide (queda «Consultando…»), después se pinta
 }
 function pintarVivo(){
   const ba=$('actualizar');if(ba)ba.classList.toggle('girando',cargando);
